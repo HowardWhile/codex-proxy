@@ -1,93 +1,105 @@
 
 $Proxy = "http://127.0.0.1:10808"
-$NoProxy = "localhost,127.0.0.1,::1"
+$SettingsPath = Join-Path $env:APPDATA "Code\User\settings.json"
 
-$ProxyVars = @(
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-    "http_proxy", "https_proxy", "all_proxy"
-)
-
-$NoProxyVars = @("NO_PROXY", "no_proxy")
-$Vars = $ProxyVars + $NoProxyVars
-
-function Set-Proxy {
+function Update-VSCodeSetting {
     param(
-        [ValidateSet("User", "Process")]
-        [string[]]$Scopes = @("User", "Process")
+        [string]$Key,
+        [string]$Value
     )
 
-    foreach ($Scope in $Scopes) {
-        foreach ($Name in $ProxyVars) {
-            [Environment]::SetEnvironmentVariable($Name, $Proxy, $Scope)
+    $content = [System.IO.File]::ReadAllText($SettingsPath)
+    $escapedKey = [regex]::Escape($Key)
+    $pattern = '(?m)^([ \t]*)"' + $escapedKey + '"\s*:\s*[^\r\n]*'
+
+    if ([regex]::IsMatch($content, $pattern)) {
+        $content = [regex]::Replace(
+            $content, $pattern,
+            { param($m) $m.Groups[1].Value + '"' + $Key + '": ' + $Value },
+            1
+        )
+    }
+    else {
+        $pos = $content.LastIndexOf("}")
+        if ($pos -lt 0) {
+            throw "Invalid VS Code settings.json"
         }
 
-        foreach ($Name in $NoProxyVars) {
-            [Environment]::SetEnvironmentVariable($Name, $NoProxy, $Scope)
+        $before = $content.Substring(0, $pos)
+        $after = $content.Substring($pos)
+
+        # Add separator if needed
+        $trimmed = $before.TrimEnd()
+        if (-not $trimmed.EndsWith("{") -and
+            -not $trimmed.EndsWith(",")) {
+            $before = $trimmed + "," + [Environment]::NewLine
         }
+
+        $content = $before + '    "' + $Key + '": ' +
+                   $Value + [Environment]::NewLine + $after
     }
 
-    Write-Host "Proxy enabled: $Proxy" -ForegroundColor Green
+    [System.IO.File]::WriteAllText(
+        $SettingsPath, $content,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+
+function Set-Proxy {
+    if (-not (Test-Path $SettingsPath)) {
+        New-Item -ItemType Directory -Force `
+            (Split-Path $SettingsPath) | Out-Null
+        Set-Content $SettingsPath "{}" -Encoding UTF8
+    }
+
+    Copy-Item $SettingsPath "$SettingsPath.bak" -Force
+
+    Update-VSCodeSetting "http.proxy" "`"$Proxy`""
+    Update-VSCodeSetting "http.proxySupport" '"override"'
+    Update-VSCodeSetting "http.noProxy" '["localhost", "127.0.0.1", "::1"]'
+
+    Write-Host "VS Code Proxy enabled: $Proxy" -ForegroundColor Green
+    Write-Host "Reload VS Code to apply changes."
 }
 
 function Remove-Proxy {
-    foreach ($Scope in @("User", "Process")) {
-        foreach ($Name in $Vars) {
-            [Environment]::SetEnvironmentVariable($Name, $null, $Scope)
-        }
-    }
+    if (-not (Test-Path $SettingsPath)) { return }
 
-    Write-Host "Proxy disabled" -ForegroundColor Yellow
+    Copy-Item $SettingsPath "$SettingsPath.bak" -Force
+
+    Update-VSCodeSetting "http.proxy" '""'
+    Update-VSCodeSetting "http.proxySupport" '"off"'
+    Update-VSCodeSetting "http.noProxy" '[]'
+
+    Write-Host "VS Code Proxy disabled" -ForegroundColor Yellow
+    Write-Host "Reload VS Code to apply changes."
 }
 
 function Show-Proxy {
-    Write-Host "`nCurrent Proxy Status:" -ForegroundColor Cyan
+    Write-Host "`nVS Code Proxy Settings:" -ForegroundColor Cyan
 
-    foreach ($Name in $Vars) {
-        $UserValue = [Environment]::GetEnvironmentVariable($Name, "User")
-        $ProcessValue = [Environment]::GetEnvironmentVariable($Name, "Process")
-
-        if (-not $UserValue) { $UserValue = "(Not Set)" }
-        if (-not $ProcessValue) { $ProcessValue = "(Not Set)" }
-
-        Write-Host "${Name}:"
-        Write-Host "  User:    $UserValue"
-        Write-Host "  Process: $ProcessValue"
+    if (-not (Test-Path $SettingsPath)) {
+        Write-Host "Settings file not found"
+        return
     }
-}
 
-function Start-Codex {
-    Set-Proxy -Scopes @("Process")
-
-    Write-Host "`nStarting Codex..." -ForegroundColor Cyan
-    codex
-}
-
-function Test-Codex {
-    Set-Proxy -Scopes @("Process")
-
-    Write-Host "`nTesting Codex..." -ForegroundColor Cyan
-    codex exec --skip-git-repo-check "Reply with OK only"
+    Select-String -Path $SettingsPath `
+        -Pattern '"http\.(proxy|proxySupport|noProxy)"\s*:'
 }
 
 while ($true) {
     Write-Host ""
-    Write-Host "========== Codex Proxy ==========" -ForegroundColor Cyan
-    Write-Host "1. Enable Proxy (Persistent)"
+    Write-Host "========== VS Code Proxy ==========" -ForegroundColor Cyan
+    Write-Host "1. Enable Proxy"
     Write-Host "2. Disable Proxy"
     Write-Host "3. Show Status"
-    Write-Host "4. Start Codex TUI"
-    Write-Host "5. Test Codex Connection"
     Write-Host "0. Exit"
-    Write-Host "================================="
+    Write-Host "==================================="
 
-    $Choice = Read-Host "Select"
-
-    switch ($Choice) {
+    switch (Read-Host "Select") {
         "1" { Set-Proxy }
         "2" { Remove-Proxy }
         "3" { Show-Proxy }
-        "4" { Start-Codex }
-        "5" { Test-Codex }
         "0" { exit }
         default {
             Write-Host "Invalid selection" -ForegroundColor Red
